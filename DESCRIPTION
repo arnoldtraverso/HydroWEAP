@@ -1,0 +1,25 @@
+Package: HydroWEAP
+Type: Package
+Title: Extraction of Climate Data from NetCDF to WEAP Format
+Version: 0.1.0
+Authors@R:
+    person("Kevin Arnold", "Traverso",
+           email = "arnold.traverso@gmail.com",
+           role = c("aut", "cre"))
+Description: Herramientas para extraer series de precipitacion y temperatura
+    desde datos grillados en NetCDF (por ejemplo PISCO), agregadas por
+    poligonos de subcuenca, y exportarlas en el formato CSV 'ReadFromFile'
+    que utiliza el modelo hidrologico WEAP (Water Evaluation And Planning).
+License: GPL-2
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.3
+Depends:
+    R (>= 3.5.0)
+Imports:
+    terra,
+    utils
+Suggests:
+    sf
+URL: https://github.com/arnoldtraverso/HydroWEAP
+BugReports: https://github.com/arnoldtraverso/HydroWEAP/issues

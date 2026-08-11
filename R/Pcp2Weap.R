@@ -1,82 +1,64 @@
-#' Funcion de extracción rápida de datos de precipitaciones
-#' La función se ejecuta para extrer los datos de preciptiaciones de un
-#' formato de datos tipo NetCDF y las lleva a formatos de texto csv
-#' delimitado por comas, este fomrato de salida será utlizado para llevalos 
-#' datos al modelo hidrológico WEAP 
-#' 
-#' @param grid Directorio de información de datos en NetCDF
-#' @param subs Directorio de archivo '.shp', en general de una cuenca hidrográfica y sus subcvuencas
-#' @param cores Número de hilos de proceso, según disponible por procesador 
+#' Extraer precipitacion de un NetCDF al formato WEAP
 #'
+#' Extrae series de precipitacion desde uno o varios archivos NetCDF grillados
+#' (por ejemplo PISCO), calculando el promedio areal dentro de cada subcuenca,
+#' y devuelve un `data.frame` listo para exportar al formato WEAP.
+#'
+#' @param nc Ruta(s) a archivo(s) NetCDF, o un objeto `SpatRaster`. Si se pasan
+#'   varias rutas se apilan en un unico `SpatRaster`.
+#' @param subs Ruta a un shapefile de subcuencas, o un objeto `SpatVector` de
+#'   poligonos.
+#' @param field Nombre del campo de `subs` que contiene el codigo WEAP de cada
+#'   subcuenca; se usa como nombre de columna en la salida.
+#' @param dates Vector `Date` opcional con una fecha por capa temporal. Si es
+#'   `NULL` (por defecto) las fechas se leen de la dimension de tiempo del
+#'   NetCDF.
+#' @param digits Numero de decimales al que redondear los valores.
+#' @param file Ruta opcional del CSV de salida. Si se indica, el resultado se
+#'   escribe en formato WEAP con [write_weap_csv()] y el `data.frame` se
+#'   devuelve de forma invisible.
+#' @param fun Funcion de agregacion aplicada a las celdas de cada subcuenca
+#'   (por defecto la media aritmetica).
+#'
+#' @return Un `data.frame` con columnas `Date`, `Year`, `Month`, `Day` y una
+#'   columna por subcuenca. Si se indica `file`, se devuelve de forma invisible.
 #' @export
-#' @importFrom terra rast vect extract
-#' @importFrom utils txtProgressBar setTxtProgressBar
+#' @importFrom terra rast vect extract time
+#'
+#' @examples
+#' \dontrun{
+#' # Devolver el data.frame en memoria
+#' pcp <- pcp2weap("precip.nc", "subcuencas.shp", field = "Cod_WEAP")
+#'
+#' # Extraer y escribir el CSV de WEAP en un solo paso
+#' pcp2weap("precip.nc", "subcuencas.shp", field = "Cod_WEAP",
+#'          file = "Datos_pcp.csv")
+#' }
+pcp2weap <- function(nc, subs, field, dates = NULL, digits = 2,
+                     file = NULL, fun = mean) {
+  grid  <- .as_spatraster(nc)
+  subs  <- .as_spatvector(subs)
 
-pcp2weap <- function(grid, subs, cores){
-  
-  cell.numbers <- function(grid, geom){
-    spacialcov <- grid
-    spacialcov[] <- 1:raster::ncell(grid)
-    position_rowcol <- function(i){
-      quad1 <- unlist(raster::extract(x = spacialcov, y = geom[i, ], small = TRUE))
-    }
-    position <- lapply(1:length(geom), position_rowcol)
-    return(position)
+  if (!field %in% names(subs)) {
+    stop("El campo '", field, "' no existe en 'subs'. Campos disponibles: ",
+         paste(names(subs), collapse = ", "), call. = FALSE)
   }
-  
-  extract.fast <- function(grid, cells, fun = mean, na.rm = TRUE){
-    matrix.r <- t(raster::as.matrix(grid))
-    res <- sapply(1:length(cells), function(i){
-      value <- matrix.r[cells[[i]]]
-      fun(value, na.rm = na.rm)
-    })
-  }
-  
-  cell.numbers <- cell.numbers(grid = grid[[1]], geom = subs)
-  cl <- parallel::makeCluster(cores)
-  
-  parallel::clusterEvalQ(cl = cl, expr = c(library(raster)))
-  parallel::clusterExport(cl = cl, varlist = c("grid",
-                                               "cell.numbers",
-                                               "extract.fast"),
-                          envir = environment())
-  
-  # proceso de extraccion
-  mean <- parallel::parLapply(cl, c(1:raster::nlayers(grid)), function(z){
-    pre <- extract.fast(grid = grid[[z]],
-                        cells = cell.numbers,
-                        fun = mean,
-                        na.rm = TRUE)
-    return(pre)
-  })
-  
-  parallel::stopCluster(cl)
-  mean <- do.call(rbind, mean)
-  return(mean)
-}
+  codes <- as.character(subs[[field]][, 1])
+  dates <- .get_dates(grid, dates)
 
-# ---------------------------------------------------------------------------
-# FUNCION: escribir el CSV en formato WEAP
-# ---------------------------------------------------------------------------
-write_weap_csv <- function(df, file){
-  # df debe traer las columnas: Date, Year, Month, Day, <catchments...>
-  n_total <- ncol(df)                 # total de columnas (4 + n subcuencas)
-  relleno <- strrep(",", n_total - 1) # comas para completar la fila
-  
-  # Cabeceras (directivas) de WEAP
-  cab <- c(
-    paste0("\"$ListSeparator = ,\"", relleno),
-    paste0("$DecimalSymbol = .",     relleno),
-    paste0("$DateFormat = yyyy-mm-dd", relleno),
-    paste0("$Columns = ", paste(colnames(df), collapse = ","))
-  )
-  
-  con <- file(file, open = "w", encoding = "UTF-8")
-  on.exit(close(con))
-  writeLines(cab, con)
-  
-  # Datos (sin cabecera de columnas, sin comillas, NA como vacio)
-  utils::write.table(df, file = con, sep = ",",
-                     row.names = FALSE, col.names = FALSE,
-                     quote = FALSE, na = "")
+  values <- extract_areal(grid, subs, fun = fun)
+
+  if (nrow(values) != length(dates)) {
+    warning(sprintf(
+      "Las capas del NetCDF (%d) no coinciden con las fechas (%d).",
+      nrow(values), length(dates)), call. = FALSE)
+  }
+
+  df <- build_weap_df(values, dates, codes, digits)
+
+  if (!is.null(file)) {
+    write_weap_csv(df, file)
+    return(invisible(df))
+  }
+  df
 }
